@@ -1,313 +1,282 @@
-#include "stm32g4xx_hal.h"
-#include <math.h>
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Progetto: Sistema con Display SSD1306 e 7 Pulsanti
+ * Board: STM32 Nucleo G474RE
+ * 
+ * Hardware:
+ * - Display OLED SSD1306 128x64 su I2C1 (PB8=SCL, PB9=SDA)
+ * - 7 Pulsanti su PA0, PA1, PA4, PB0, PA8, PA9, PA10
+ *
+ ******************************************************************************
+ */
 
-// Handles
-DAC_HandleTypeDef hdac1;
-TIM_HandleTypeDef htim6;
-DMA_HandleTypeDef hdma_dac1_ch1;
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "app_config.h"
+#include "display_ssd1306.h"
+#include "buttons.h"
+#include <stdio.h>
+#include <string.h>
 
-// Lookup table sinusoide (256 campioni, 12-bit resolution)
-#define SINE_SAMPLES 256
-uint16_t sine_wave[SINE_SAMPLES];
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+UART_HandleTypeDef huart2;
 
-// Frequenze delle note (Ottava 4: Do4 a Si4)
-const float note_frequencies[12] = {
-    261.63,  // Do4  (C4)
-    277.18,  // Do#4 (C#4)
-    293.66,  // Re4  (D4)
-    311.13,  // Re#4 (D#4)
-    329.63,  // Mi4  (E4)
-    349.23,  // Fa4  (F4)
-    369.99,  // Fa#4 (F#4)
-    392.00,  // Sol4 (G4)
-    415.30,  // Sol#4(G#4)
-    440.00,  // La4  (A4)
-    466.16,  // La#4 (A#4)
-    493.88   // Si4  (B4)
-};
-
-const char* note_names[12] = {
-    "Do4", "Do#4", "Re4", "Re#4", "Mi4", "Fa4",
-    "Fa#4", "Sol4", "Sol#4", "La4", "La#4", "Si4"
-};
-
-// Variabili per gestione pulsante
-volatile uint8_t current_note = 9;  // Inizia con La4 (440 Hz)
-volatile uint32_t last_button_press = 0;
-#define DEBOUNCE_DELAY 200  // 200ms debounce
-
-// Function prototypes
+/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void Error_Handler(void);
-void DAC_Init(void);
-void TIM6_Init(void);
-void DMA_Init(void);
-void GPIO_Init(void);
-void Generate_Sine_Wave(void);
-void Update_Frequency(uint8_t note_index);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_USART2_UART_Init(void);
 
-// Generate sine wave lookup table
-void Generate_Sine_Wave(void) {
-    for (int i = 0; i < SINE_SAMPLES; i++) {
-        // Genera sinusoide: valore tra 0 e 4095 (12-bit)
-        // Offset a 2048 per centrare, ampiezza 1800 (ridotta per evitare distorsione)
-        float angle = 2.0f * M_PI * i / SINE_SAMPLES;
-        sine_wave[i] = (uint16_t)(2048 + 1800 * sinf(angle));
-    }
-}
+/* Private user code ---------------------------------------------------------*/
 
-// Aggiorna frequenza del timer per la nota selezionata
-void Update_Frequency(uint8_t note_index) {
-    if (note_index >= 12) note_index = 0;
-    
-    // Sample rate = frequenza nota × numero campioni
-    uint32_t sample_rate = (uint32_t)(note_frequencies[note_index] * SINE_SAMPLES);
-    
-    // Calcola periodo timer (assumendo clock a 170 MHz)
-    // Se usi HSI a 16 MHz, usa 16000000 invece di 170000000
-    uint32_t timer_period = (170000000 / sample_rate) - 1;
-    
-    // Ferma timer e DAC
-    HAL_TIM_Base_Stop(&htim6);
-    HAL_DAC_Stop_DMA(&hdac1, DAC_CHANNEL_1);
-    
-    // Aggiorna periodo
-    __HAL_TIM_SET_AUTORELOAD(&htim6, timer_period);
-    
-    // Riavvia
-    HAL_DAC_Start_DMA(&hdac1, DAC_CHANNEL_1, (uint32_t*)sine_wave, 
-                      SINE_SAMPLES, DAC_ALIGN_12B_R);
-    HAL_TIM_Base_Start(&htim6);
-}
-
-int main(void) {
-    // Inizializzazione HAL
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+    /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
     HAL_Init();
-    
-    // Configura clock (usa PLL per 170MHz o lascia HSI a 16MHz)
+
+    /* Configure the system clock */
     SystemClock_Config();
-    
-    // Genera lookup table sinusoide
-    Generate_Sine_Wave();
-    
-    // Inizializza GPIO (LED, DAC, Pulsante)
-    GPIO_Init();
-    
-    // Inizializza periferiche audio
-    DMA_Init();
-    DAC_Init();
-    TIM6_Init();
-    
-    // Avvia generazione onda con la nota corrente (La4 - 440 Hz)
-    Update_Frequency(current_note);
-    
-    // Lampeggia LED veloce 3 volte per conferma avvio
-    for(int i = 0; i < 3; i++) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-        HAL_Delay(100);
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-        HAL_Delay(100);
+
+    /* Initialize all configured peripherals */
+    MX_GPIO_Init();
+    MX_I2C1_Init();
+    MX_USART2_UART_Init();
+
+    /* USER CODE BEGIN 2 */
+    printf("\r\n");
+    printf("========================================\r\n");
+    printf("  Sistema STM32 Nucleo G474RE\r\n");
+    printf("  Display: SSD1306 OLED 128x64\r\n");
+    printf("  Input: 7 Pulsanti\r\n");
+    printf("========================================\r\n\r\n");
+
+    // Inizializza il display SSD1306
+    printf("[MAIN] Inizializzazione display SSD1306...\r\n");
+    if (SSD1306_Init(&hi2c1)) {
+        printf("[MAIN] Display OK!\r\n");
+    } else {
+        printf("[MAIN] ERRORE: Display non risponde!\r\n");
     }
-    
-    while (1) {
-        // Controlla pulsante USER (PC13)
-        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {  // Pulsante premuto (active low)
-            uint32_t current_time = HAL_GetTick();
+
+    // Inizializza i pulsanti
+    printf("[MAIN] Inizializzazione pulsanti...\r\n");
+    Buttons_Init();
+    printf("[MAIN] Pulsanti OK!\r\n\r\n");
+
+    // Test del display
+    printf("[MAIN] Esecuzione test display...\r\n");
+    SSD1306_Test();
+    HAL_Delay(2000);
+
+    // Schermata iniziale
+    SSD1306_Fill(SSD1306_COLOR_BLACK);
+    SSD1306_DrawRectangle(0, 0, 127, 63, SSD1306_COLOR_WHITE);
+    SSD1306_DrawLine(10, 20, 117, 20, SSD1306_COLOR_WHITE);
+    SSD1306_UpdateScreen();
+
+    printf("[MAIN] Sistema pronto!\r\n");
+    printf("[MAIN] Premi i pulsanti per testare...\r\n\r\n");
+
+    /* USER CODE END 2 */
+
+    /* Infinite loop */
+    uint32_t last_scan = 0;
+    const char *button_names[] = {
+        "NONE", "UP", "DOWN", "LEFT", "RIGHT", "ENTER", "BACK", "MENU"
+    };
+
+    while (1)
+    {
+        /* USER CODE BEGIN WHILE */
+        
+        // Scansiona i pulsanti ogni 10ms
+        if (HAL_GetTick() - last_scan >= 10) {
+            last_scan = HAL_GetTick();
+            Buttons_Scan();
             
-            // Debouncing: ignora se premuto troppo presto
-            if ((current_time - last_button_press) > DEBOUNCE_DELAY) {
-                last_button_press = current_time;
-                
-                // Passa alla nota successiva
-                current_note = (current_note + 1) % 12;
-                Update_Frequency(current_note);
-                
-                // Lampeggia LED per feedback visivo
-                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
-                HAL_Delay(50);
-                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-                
-                // Aspetta rilascio pulsante
-                while(HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET) {
-                    HAL_Delay(10);
+            // Rileva pressione pulsanti e stampa su UART
+            for (int i = BTN_UP; i <= BTN_MENU; i++) {
+                if (Buttons_WasPressed((Button_t)i)) {
+                    printf("[MAIN] Pulsante %s premuto!\r\n", button_names[i]);
+                    
+                    // Feedback visivo sul display
+                    SSD1306_Fill(SSD1306_COLOR_BLACK);
+                    SSD1306_DrawRectangle(20, 20, 80, 30, SSD1306_COLOR_WHITE);
+                    // Qui potresti scrivere il nome del pulsante (quando implementi i font)
+                    SSD1306_UpdateScreen();
                 }
             }
         }
-        
-        HAL_Delay(10);  // Polling ogni 10ms
+
+        /* USER CODE END WHILE */
     }
 }
 
-void GPIO_Init(void) {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    
-    // Abilita clock GPIO
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    
-    // Configura PA5 come output (LED verde - per debug)
-    GPIO_InitStruct.Pin = GPIO_PIN_5;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    
-    // Configura PA4 come analog (DAC1_OUT1)
-    GPIO_InitStruct.Pin = GPIO_PIN_4;
-    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    
-    // Configura PC13 come input (Pulsante USER - con pull-up interno)
-    GPIO_InitStruct.Pin = GPIO_PIN_13;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLUP;  // Pull-up perché il pulsante è active-low
-    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-}
-
-void DMA_Init(void) {
-    // Abilita clock DMA1 e DMAMUX
-    __HAL_RCC_DMA1_CLK_ENABLE();
-    __HAL_RCC_DMAMUX1_CLK_ENABLE();
-    
-    // Configura DMA per DAC1 Channel 1
-    hdma_dac1_ch1.Instance = DMA1_Channel1;
-    hdma_dac1_ch1.Init.Request = DMA_REQUEST_DAC1_CHANNEL1;
-    hdma_dac1_ch1.Init.Direction = DMA_MEMORY_TO_PERIPH;
-    hdma_dac1_ch1.Init.PeriphInc = DMA_PINC_DISABLE;
-    hdma_dac1_ch1.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_dac1_ch1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
-    hdma_dac1_ch1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
-    hdma_dac1_ch1.Init.Mode = DMA_CIRCULAR;
-    hdma_dac1_ch1.Init.Priority = DMA_PRIORITY_HIGH;
-    
-    if (HAL_DMA_Init(&hdma_dac1_ch1) != HAL_OK) {
-        Error_Handler();
-    }
-    
-    // Link DMA al DAC
-    __HAL_LINKDMA(&hdac1, DMA_Handle1, hdma_dac1_ch1);
-}
-
-void DAC_Init(void) {
-    DAC_ChannelConfTypeDef sConfig = {0};
-    
-    // Abilita clock DAC1
-    __HAL_RCC_DAC1_CLK_ENABLE();
-    
-    // Configura DAC1
-    hdac1.Instance = DAC1;
-    if (HAL_DAC_Init(&hdac1) != HAL_OK) {
-        Error_Handler();
-    }
-    
-    // Configura canale DAC1_OUT1
-    sConfig.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_AUTOMATIC;
-    sConfig.DAC_DMADoubleDataMode = DISABLE;
-    sConfig.DAC_SignedFormat = DISABLE;
-    sConfig.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
-    sConfig.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
-    sConfig.DAC_Trigger2 = DAC_TRIGGER_NONE;
-    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-    sConfig.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_EXTERNAL;
-    sConfig.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
-    
-    if (HAL_DAC_ConfigChannel(&hdac1, &sConfig, DAC_CHANNEL_1) != HAL_OK) {
-        Error_Handler();
-    }
-}
-
-void TIM6_Init(void) {
-    TIM_MasterConfigTypeDef sMasterConfig = {0};
-    
-    // Abilita clock TIM6
-    __HAL_RCC_TIM6_CLK_ENABLE();
-    
-    // Inizializza con La4 (440 Hz)
-    uint32_t sample_rate = (uint32_t)(440.0f * SINE_SAMPLES);  // 112640 Hz
-    uint32_t timer_period = (170000000 / sample_rate) - 1;  // Con PLL a 170MHz
-    // Se usi HSI: uint32_t timer_period = (16000000 / sample_rate) - 1;
-    
-    // Configura TIM6
-    htim6.Instance = TIM6;
-    htim6.Init.Prescaler = 0;
-    htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-    htim6.Init.Period = timer_period;
-    htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-    
-    if (HAL_TIM_Base_Init(&htim6) != HAL_OK) {
-        Error_Handler();
-    }
-    
-    // Configura TRGO per trigger DAC
-    sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
-    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-    
-    if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK) {
-        Error_Handler();
-    }
-}
-
-void SystemClock_Config(void) {
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
     RCC_OscInitTypeDef RCC_OscInitStruct = {0};
     RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-    // Configura voltage scaling per massime prestazioni
-    HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
+    /** Configure the main internal regulator output voltage
+    */
+    HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-    // Configura HSI con PLL per 170 MHz
+    /** Initializes the RCC Oscillators according to the specified parameters
+    * in the RCC_OscInitTypeDef structure.
+    */
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
     RCC_OscInitStruct.HSIState = RCC_HSI_ON;
     RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
     RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
     RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-    RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;     // 16MHz / 4 = 4MHz
-    RCC_OscInitStruct.PLL.PLLN = 85;                 // 4MHz * 85 = 340MHz
-    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;     // 340MHz / 2 = 170MHz
+    RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
+    RCC_OscInitStruct.PLL.PLLN = 85;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
     RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;     // 340MHz / 2 = 170MHz (SYSCLK)
-    
-    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+    RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
         Error_Handler();
     }
 
-    // Usa PLL come clock di sistema
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    /** Initializes the CPU, AHB and APB buses clocks
+    */
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                                |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
     RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
     RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
     RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
     RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_8) != HAL_OK) {
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+    {
         Error_Handler();
     }
 }
 
-void Error_Handler(void) {
-    // Lampeggia LED velocissimo in caso di errore
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = GPIO_PIN_5;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-    
-    while (1) {
-        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
-        for(volatile int i = 0; i < 50000; i++);
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.Timing = 0x10909CEC;  // 100kHz @ 170MHz
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    /** Configure Analogue filter
+    */
+    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
+    {
+        Error_Handler();
+    }
+
+    /** Configure Digital filter
+    */
+    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
+    {
+        Error_Handler();
     }
 }
 
-// Required for HAL
-void SysTick_Handler(void) {
-    HAL_IncTick();
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+    huart2.Instance = USART2;
+    huart2.Init.BaudRate = 115200;
+    huart2.Init.WordLength = UART_WORDLENGTH_8B;
+    huart2.Init.StopBits = UART_STOPBITS_1;
+    huart2.Init.Parity = UART_PARITY_NONE;
+    huart2.Init.Mode = UART_MODE_TX_RX;
+    huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+    huart2.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+    huart2.Init.ClockPrescaler = UART_PRESCALER_DIV1;
+    huart2.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+    if (HAL_UART_Init(&huart2) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
-void NMI_Handler(void) {}
-void HardFault_Handler(void) { Error_Handler(); }
-void MemManage_Handler(void) { Error_Handler(); }
-void BusFault_Handler(void) { Error_Handler(); }
-void UsageFault_Handler(void) { Error_Handler(); }
-void SVC_Handler(void) {}
-void DebugMon_Handler(void) {}
-void PendSV_Handler(void) {}
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+    /* GPIO Ports Clock Enable */
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+}
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+    __disable_irq();
+    while (1)
+    {
+        // LED lampeggiante in caso di errore
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // LED onboard
+        HAL_Delay(100);
+    }
+}
+
+/**
+  * @brief  Retargets the C library printf function to the USART.
+  * @param  None
+  * @retval None
+  */
+int _write(int file, char *ptr, int len)
+{
+    HAL_UART_Transmit(&huart2, (uint8_t *)ptr, len, HAL_MAX_DELAY);
+    return len;
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+    /* User can add his own implementation to report the file name and line number,
+       ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+}
+#endif /* USE_FULL_ASSERT */
