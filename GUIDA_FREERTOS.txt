@@ -1,0 +1,494 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                    GUIDA FREERTOS PER SINTETIZZATORE                       ║
+║                      Da Loop Infinito a Real-Time                          ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 1: CONCETTI FONDAMENTALI
+═══════════════════════════════════════════════════════════════════════════
+
+## Cos'è FreeRTOS?
+
+Un **sistema operativo real-time** che permette di eseguire più "task" 
+(thread) contemporaneamente su un microcontrollore.
+
+### PRIMA (senza RTOS):
+```
+Tempo:   0ms    10ms    20ms    30ms    40ms
+         │       │       │       │       │
+Main: ───┴───────┴───────┴───────┴───────┴───→
+         │                                │
+         └─ TUTTO nello stesso thread ────┘
+         
+Se Audio impiega 15ms, Display viene ritardato!
+```
+
+### DOPO (con FreeRTOS):
+```
+Tempo:   0ms    10ms    20ms    30ms    40ms
+         │       │       │       │       │
+Audio: ──█───────█───────█───────█───────█──→  (Priorità ALTA)
+Display: ───██──────██──────██──────██──────→  (Priorità MEDIA)
+LED:     ──────────█──────────█──────────█──→  (Priorità BASSA)
+         
+Ogni task gira INDIPENDENTEMENTE!
+```
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 2: COMPONENTI FREERTOS
+═══════════════════════════════════════════════════════════════════════════
+
+## 1. TASK (Thread)
+
+Un task è una funzione che gira "in parallelo" alle altre.
+
+```c
+void Task_Audio(void *pvParameters)  // Parametro (non usato spesso)
+{
+    while(1) {                       // Loop infinito
+        // Genera campione audio
+        generate_audio_sample();
+        
+        // Aspetta 1ms (rilascia CPU!)
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+```
+
+**Creazione task:**
+```c
+xTaskCreate(
+    Task_Audio,        // Funzione task
+    "Audio",           // Nome (debug)
+    512,               // Stack size (word, non byte!)
+    NULL,              // Parametro
+    3,                 // Priorità (0-7, più alto = più importante)
+    &xTaskHandle       // Handle (opzionale)
+);
+```
+
+**Priorità:**
+```
+7 - URGENTE    (Interrupt audio, timing critico)
+6 - MOLTO ALTA
+5 - ALTA       (Scansione pulsanti, MIDI)
+4 - MEDIA-ALTA
+3 - MEDIA      (Display, menu)
+2 - MEDIA-BASSA
+1 - BASSA      (LED, diagnostica)
+0 - IDLE       (Task sistema, non usare)
+```
+
+**Regola d'oro:** Task con priorità ALTA possono interrompere task BASSI!
+
+
+## 2. QUEUE (Code)
+
+Comunicazione **thread-safe** tra task.
+
+```c
+// Crea queue (10 elementi di tipo ButtonEvent_t)
+QueueHandle_t xQueueButtons;
+xQueueButtons = xQueueCreate(10, sizeof(ButtonEvent_t));
+
+// TASK 1: Metti in coda
+ButtonEvent_t event = {.button = BTN_UP, .pressed = true};
+xQueueSend(xQueueButtons, &event, portMAX_DELAY);
+
+// TASK 2: Preleva dalla coda (aspetta max 100ms)
+ButtonEvent_t received;
+if (xQueueReceive(xQueueButtons, &received, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Evento ricevuto!
+    printf("Button: %d\n", received.button);
+}
+```
+
+**Diagram:**
+```
+Task_Buttons                 Queue                 Task_Manager
+    │                          │                        │
+    │─── Send(BTN_UP) ────────→│                        │
+    │                          │                        │
+    │                          │←────── Receive() ──────│
+    │                          │                        │
+    │                          │──── BTN_UP event ─────→│
+```
+
+
+## 3. SEMAPHORE (Semafori)
+
+**Binary Semaphore:** Segnale on/off (es: "dati pronti")
+**Counting Semaphore:** Conta risorse disponibili
+
+```c
+SemaphoreHandle_t xSemDataReady;
+xSemDataReady = xSemaphoreCreateBinary();
+
+// TASK 1: Segnala che i dati sono pronti
+process_data();
+xSemaphoreGive(xSemDataReady);  // Sblocca
+
+// TASK 2: Aspetta dati
+if (xSemaphoreTake(xSemDataReady, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    // Dati pronti, usali!
+    use_data();
+}
+```
+
+
+## 4. MUTEX (Mutual Exclusion)
+
+Protegge **risorse condivise** (I2C, UART, buffer).
+
+**Problema senza mutex:**
+```
+Task A: Invia byte 1 su I2C
+Task B: Invia byte 2 su I2C  ← COLLISIONE!
+Task A: Invia byte 3 su I2C
+Risultato: Dati corrotti!
+```
+
+**Soluzione con mutex:**
+```c
+SemaphoreHandle_t xMutexI2C;
+xMutexI2C = xSemaphoreCreateMutex();
+
+// TASK A:
+xSemaphoreTake(xMutexI2C, portMAX_DELAY);  // Prendi lock
+I2C_Transmit(data_a, 3);
+xSemaphoreGive(xMutexI2C);                 // Rilascia lock
+
+// TASK B:
+xSemaphoreTake(xMutexI2C, portMAX_DELAY);  // Aspetta che A finisca
+I2C_Transmit(data_b, 2);
+xSemaphoreGive(xMutexI2C);
+```
+
+
+## 5. TIMER SOFTWARE
+
+Timer non-blocking gestiti da FreeRTOS.
+
+```c
+TimerHandle_t xTimerBlink;
+
+void vTimerCallback(TimerHandle_t xTimer)
+{
+    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+}
+
+// Crea timer (500ms, auto-reload)
+xTimerBlink = xTimerCreate(
+    "Blink",                      // Nome
+    pdMS_TO_TICKS(500),           // Periodo
+    pdTRUE,                       // Auto-reload
+    NULL,                         // ID
+    vTimerCallback                // Callback
+);
+
+// Avvia timer
+xTimerStart(xTimerBlink, 0);
+```
+
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 3: ARCHITETTURA REAL-TIME PER SINTETIZZATORE
+═══════════════════════════════════════════════════════════════════════════
+
+## Architettura Proposta
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    TASK DIAGRAM                             │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Task_Audio (Priorità 7)         ← REAL-TIME CRITICO       │
+│  ├─ Genera campioni 44.1kHz                                │
+│  ├─ Gestisce envelope (ADSR)                               │
+│  └─ Output DAC/I2S                                         │
+│                    ↓ Queue                                  │
+│                                                             │
+│  Task_MIDI (Priorità 6)          ← ALTA PRIORITÀ           │
+│  ├─ Legge UART MIDI                                        │
+│  ├─ Parsing messaggi                                       │
+│  └─ Invia note a Task_Audio                                │
+│                    ↓ Queue                                  │
+│                                                             │
+│  Task_Buttons (Priorità 5)       ← ALTA PRIORITÀ           │
+│  ├─ Scansione 10ms                                         │
+│  ├─ Debouncing                                             │
+│  └─ Invia eventi                                           │
+│                    ↓ Queue                                  │
+│                                                             │
+│  Task_Knobs (Priorità 4)         ← MEDIA-ALTA              │
+│  ├─ Legge ADC potenziometri                                │
+│  ├─ Filtra rumore                                          │
+│  └─ Aggiorna parametri                                     │
+│                    ↓ Queue                                  │
+│                                                             │
+│  Task_Display (Priorità 3)       ← MEDIA                   │
+│  ├─ Aggiorna schermo 60fps                                 │
+│  ├─ Disegna waveform                                       │
+│  └─ Menu UI                                                │
+│                    ↓ Mutex I2C                              │
+│                                                             │
+│  Task_Manager (Priorità 2)       ← MEDIA                   │
+│  ├─ State machine menu                                     │
+│  ├─ Gestione preset                                        │
+│  └─ Salva/carica EEPROM                                    │
+│                                                             │
+│  Task_LED (Priorità 1)           ← BASSA                   │
+│  └─ LED lampeggiante                                       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Flusso Dati
+
+```
+MIDI Input → Task_MIDI ──┐
+                         ├→ Queue_Notes → Task_Audio → DAC Output
+Buttons    → Task_Btns ──┘
+
+Knobs → Task_Knobs → Queue_Params → Task_Audio
+                                  ↓
+                            Task_Display (visualizza valore)
+```
+
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 4: ESEMPIO CONCRETO - TASK AUDIO
+═══════════════════════════════════════════════════════════════════════════
+
+```c
+// Struttura nota
+typedef struct {
+    uint8_t note;       // MIDI note number (0-127)
+    uint8_t velocity;   // Velocità (0-127)
+    bool on;            // true = note on, false = note off
+} NoteEvent_t;
+
+// Queue globale
+QueueHandle_t xQueueNotes;
+
+/* ============================================
+ * TASK AUDIO - Generazione audio real-time
+ * ============================================ */
+void Task_Audio(void *pvParameters)
+{
+    NoteEvent_t note_event;
+    
+    // Parametri sintesi
+    float frequency = 440.0f;
+    float phase = 0.0f;
+    float amplitude = 0.0f;
+    
+    // ADSR envelope
+    typedef enum { ENV_IDLE, ENV_ATTACK, ENV_DECAY, 
+                   ENV_SUSTAIN, ENV_RELEASE } EnvState_t;
+    EnvState_t env_state = ENV_IDLE;
+    
+    const float SAMPLE_RATE = 44100.0f;
+    const float ATTACK_TIME = 0.01f;   // 10ms
+    const float DECAY_TIME = 0.1f;     // 100ms
+    const float SUSTAIN_LEVEL = 0.7f;
+    const float RELEASE_TIME = 0.2f;   // 200ms
+    
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(1000 / SAMPLE_RATE);
+    // = 0.0227ms per campione @ 44.1kHz
+    
+    while(1) {
+        // Controlla nuove note (non-blocking)
+        if (xQueueReceive(xQueueNotes, &note_event, 0) == pdTRUE) {
+            if (note_event.on) {
+                // Note ON
+                frequency = 440.0f * powf(2.0f, (note_event.note - 69) / 12.0f);
+                env_state = ENV_ATTACK;
+            } else {
+                // Note OFF
+                env_state = ENV_RELEASE;
+            }
+        }
+        
+        // Aggiorna envelope
+        switch(env_state) {
+            case ENV_ATTACK:
+                amplitude += 1.0f / (ATTACK_TIME * SAMPLE_RATE);
+                if (amplitude >= 1.0f) {
+                    amplitude = 1.0f;
+                    env_state = ENV_DECAY;
+                }
+                break;
+                
+            case ENV_DECAY:
+                amplitude -= (1.0f - SUSTAIN_LEVEL) / (DECAY_TIME * SAMPLE_RATE);
+                if (amplitude <= SUSTAIN_LEVEL) {
+                    amplitude = SUSTAIN_LEVEL;
+                    env_state = ENV_SUSTAIN;
+                }
+                break;
+                
+            case ENV_SUSTAIN:
+                // Mantieni amplitude
+                break;
+                
+            case ENV_RELEASE:
+                amplitude -= SUSTAIN_LEVEL / (RELEASE_TIME * SAMPLE_RATE);
+                if (amplitude <= 0.0f) {
+                    amplitude = 0.0f;
+                    env_state = ENV_IDLE;
+                }
+                break;
+        }
+        
+        // Genera sample (square wave)
+        phase += (2.0f * M_PI * frequency) / SAMPLE_RATE;
+        if (phase >= 2.0f * M_PI) phase -= 2.0f * M_PI;
+        
+        float sample = (phase < M_PI) ? 1.0f : -1.0f;
+        sample *= amplitude;
+        
+        // Output a DAC (12-bit, 0-4095)
+        uint16_t dac_value = (uint16_t)((sample + 1.0f) * 2047.5f);
+        HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dac_value);
+        
+        // Timing preciso (non-blocking!)
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
+```
+
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 5: GESTIONE MEMORIA E DEBUG
+═══════════════════════════════════════════════════════════════════════════
+
+## Heap Size
+
+In FreeRTOSConfig.h:
+```c
+#define configTOTAL_HEAP_SIZE  (20 * 1024)  // 20KB
+```
+
+**Come calcolare:**
+```
+Stack per task:
+- Task_Audio:   1024 word = 4KB  (calcoli float)
+- Task_MIDI:     512 word = 2KB
+- Task_Buttons:  256 word = 1KB
+- Task_Display:  512 word = 2KB
+- Task_Manager:  512 word = 2KB
+- Task_LED:      128 word = 0.5KB
+                         ───────
+                         11.5KB
+
+Queue e Mutex:           ~2KB
+Buffer audio:            ~4KB
+Margine sicurezza:       ~2.5KB
+                         ───────
+TOTALE:                  20KB
+```
+
+## Debug Stack Overflow
+
+```c
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    printf("[ERROR] Stack overflow in: %s\r\n", pcTaskName);
+    // Aumenta stack size del task!
+}
+```
+
+## Monitor Task
+
+```c
+void Task_Monitor(void *pvParameters)
+{
+    while(1) {
+        printf("\r\n=== TASK STATUS ===\r\n");
+        
+        char buffer[512];
+        vTaskList(buffer);
+        printf("%s\r\n", buffer);
+        
+        printf("Heap free: %u byte\r\n", xPortGetFreeHeapSize());
+        
+        vTaskDelay(pdMS_TO_TICKS(5000));  // Ogni 5 secondi
+    }
+}
+```
+
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 6: BEST PRACTICES
+═══════════════════════════════════════════════════════════════════════════
+
+## DO's ✅
+
+1. **Usa vTaskDelayUntil() per timing preciso**
+   ```c
+   TickType_t xLastWakeTime = xTaskGetTickCount();
+   while(1) {
+       do_work();
+       vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));  // Esatto!
+   }
+   ```
+
+2. **Proteggi risorse condivise con mutex**
+   ```c
+   xSemaphoreTake(xMutexI2C, portMAX_DELAY);
+   SSD1306_UpdateScreen();
+   xSemaphoreGive(xMutexI2C);
+   ```
+
+3. **Usa queue per comunicazione tra task**
+   ```c
+   // Non: variabili globali condivise (unsafe!)
+   // Sì: queue (thread-safe)
+   ```
+
+4. **Priorità giuste**
+   - Audio/MIDI → ALTA
+   - UI/Display → MEDIA
+   - LED/Debug → BASSA
+
+## DON'Ts ❌
+
+1. **MAI HAL_Delay() nei task!**
+   ```c
+   ❌ HAL_Delay(100);           // Blocca TUTTO lo scheduler!
+   ✅ vTaskDelay(pdMS_TO_TICKS(100));  // Rilascia CPU
+   ```
+
+2. **MAI malloc() nei task real-time**
+   ```c
+   ❌ float *buffer = malloc(1024);  // Non deterministico!
+   ✅ static float buffer[256];      // Statico
+   ```
+
+3. **MAI printf() senza mutex**
+   ```c
+   ❌ printf("Valore: %d", x);  // UART condivisa, crash!
+   ✅ SafePrintf("Valore: %d", x);  // Con mutex
+   ```
+
+4. **MAI loop infiniti senza delay**
+   ```c
+   ❌ while(condition);  // Blocca task a bassa priorità!
+   ✅ while(condition) { vTaskDelay(1); }
+   ```
+
+
+═══════════════════════════════════════════════════════════════════════════
+PARTE 7: NEXT STEPS
+═══════════════════════════════════════════════════════════════════════════
+
+1. **Compila il codice base FreeRTOS fornito**
+2. **Aggiungi Task_Audio con generazione semplice (square wave)**
+3. **Aggiungi Task_MIDI per input UART**
+4. **Implementa Queue tra MIDI e Audio**
+5. **Aggiungi ADC per potenziometri (Task_Knobs)**
+6. **Ottimizza timing audio (DMA + interrupt)**
+
+═══════════════════════════════════════════════════════════════════════════
