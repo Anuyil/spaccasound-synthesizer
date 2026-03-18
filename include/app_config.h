@@ -30,24 +30,29 @@
 // Uso pin facilmente accessibili sui connettori Arduino
 
 // Connettore CN7 (lato sinistro)
-#define BUTTON_UP_PIN           GPIO_PIN_0   // PA0 - CN7 pin 28 (A0)
-#define BUTTON_DOWN_PIN         GPIO_PIN_1   // PA1 - CN7 pin 30 (A1)
-#define BUTTON_LEFT_PIN         GPIO_PIN_4   // PA4 - CN7 pin 32 (A2)
+#define BUTTON_LEFT_PIN           GPIO_PIN_0   // PA0 - CN7 pin 28 (A0)
+#define BUTTON_UP_PIN         GPIO_PIN_1   // PA1 - CN7 pin 30 (A1)
+#define BUTTON_DOWN_PIN         GPIO_PIN_4   // PA4 - CN7 pin 32 (A2)
 #define BUTTON_RIGHT_PIN        GPIO_PIN_0   // PB0 - CN7 pin 34 (A3)
 
 // Connettore CN10 (lato destro)
-#define BUTTON_ENTER_PIN        GPIO_PIN_8   // PA8 - CN10 pin 23 (D7)
-#define BUTTON_BACK_PIN         GPIO_PIN_9   // PA9 - CN10 pin 21 (D8)
-#define BUTTON_MENU_PIN         GPIO_PIN_10  // PA10 - CN10 pin 33 (D2)
+#define BUTTON_ENTER_PIN        GPIO_PIN_13   // PB13 -  pin 30 
+#define BUTTON_BACK_PIN         GPIO_PIN_14   // PB14 -  pin 28 
+#define BUTTON_MENU_PIN         GPIO_PIN_15  // PB15 -  pin 26 
+
+
+// PB15 26
+// PB14 28
+// PB13 30
 
 // Port GPIO per ogni pulsante
 #define BUTTON_UP_PORT          GPIOA
 #define BUTTON_DOWN_PORT        GPIOA
 #define BUTTON_LEFT_PORT        GPIOA
 #define BUTTON_RIGHT_PORT       GPIOB
-#define BUTTON_ENTER_PORT       GPIOA
-#define BUTTON_BACK_PORT        GPIOA
-#define BUTTON_MENU_PORT        GPIOA
+#define BUTTON_ENTER_PORT       GPIOB
+#define BUTTON_BACK_PORT        GPIOB
+#define BUTTON_MENU_PORT        GPIOB
 
 // Tempo di debounce in ms
 #define BUTTON_DEBOUNCE_MS      50
